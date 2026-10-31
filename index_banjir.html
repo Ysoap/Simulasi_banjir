@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoring Muka Air</title>
+<style>
+  :root { --bg:#eef3f5; --card:#fff; --ink:#12222a; --muted:#5b6c74; --line:#d3dde2;
+          --ok:#1f9a5b; --warn:#c98a00; --bad:#d33a3a; --idle:#7d8c93; --accent:#1b78b5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0c1317; --card:#141e24; --ink:#e4eef2; --muted:#8fa3ad; --line:#26353d;
+            --ok:#3ec27a; --warn:#e8b13a; --bad:#ee5c5c; --idle:#6a7a83; --accent:#4aa8e0; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:22px 16px 48px; }
+  header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+  h1 { font-size:1.35rem; margin:0; }
+  .conn { font-size:.85rem; color:var(--muted); }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--idle); margin-right:6px; }
+  .dot.on { background:var(--ok); }
+  .status { margin:16px 0; border-radius:14px; padding:20px 22px; color:#fff; background:var(--idle); }
+  .status.NORMAL { background:var(--ok); } .status.WASPADA { background:var(--warn); color:#1c1400; }
+  .status.BAHAYA { background:var(--bad); }
+  .status b { display:block; font-size:2rem; line-height:1.15; }
+  .status span { font-size:.9rem; opacity:.92; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .card small { color:var(--muted); }
+  .v { font-size:2.2rem; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.2; }
+  .v i { font-style:normal; font-size:1rem; font-weight:400; color:var(--muted); margin-left:4px; }
+  .sub { color:var(--muted); font-size:.9rem; }
+  .arah { font-weight:600; }
+  .arah.naik { color:var(--bad); } .arah.turun { color:var(--accent); } .arah.stabil { color:var(--muted); }
+  canvas { width:100%; height:90px; display:block; margin-top:8px; }
+  .foot { margin-top:14px; font-size:.85rem; color:var(--muted); }
+  .foot p { margin:3px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Monitoring Muka Air</h1>
+    <div class="conn"><span class="dot" id="dot"></span><span id="conn">Menyambung...</span></div>
+  </header>
+
+  <div class="status" id="status"><b id="stText">Menunggu data</b><span id="stSub">Menunggu kiriman dari alat...</span></div>
+
+  <div class="grid">
+    <div class="card">
+      <small>Jarak sensor ke permukaan air</small>
+      <div class="v"><span id="jarak">--</span><i>cm</i></div>
+      <div class="sub">Makin kecil, air makin tinggi</div>
+      <canvas id="cJarak" aria-label="Grafik jarak"></canvas>
+    </div>
+    <div class="card">
+      <small>Laju perubahan muka air</small>
+      <div class="v"><span id="laju">--</span><i>cm/detik</i></div>
+      <div class="sub"><span class="arah stabil" id="arah">-</span> <span id="menit"></span></div>
+      <canvas id="cLaju" aria-label="Grafik laju"></canvas>
+    </div>
+    <div class="card">
+      <small>Perkiraan tiba di batas BAHAYA</small>
+      <div class="v" id="eta">--</div>
+      <div class="sub">Dihitung dari laju kenaikan saat ini</div>
+    </div>
+    <div class="card">
+      <small>Pompa</small>
+      <div class="v" id="pompa">--</div>
+      <div class="sub" id="dev">Alat: belum ada kabar</div>
+    </div>
+  </div>
+
+  <div class="foot"><p id="last">Pembaruan terakhir: -</p></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+  // Kode unik tetap, harus sama persis dengan KODE_UNIK di laju_air.h
+  const KODE   = "WL-9c2b7e";
+  const BROKER = "wss://broker.emqx.io:8084/mqtt";   // wss:// wajib karena halaman memakai HTTPS
+  const $ = (id) => document.getElementById(id);
+  const MAKS_TITIK = 90;
+  const dJarak = [], dLaju = [];
+
+  const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  function gambar(canvas, data, warna, nolTengah) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const g = canvas.getContext("2d");
+    g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+    if (data.length < 2) return;
+    let lo = Math.min(...data), hi = Math.max(...data);
+    if (nolTengah) { const m = Math.max(Math.abs(lo), Math.abs(hi), 0.1); lo = -m; hi = m; }
+    else if (hi - lo < 1) { const c = (hi + lo) / 2; lo = c - 0.5; hi = c + 0.5; }
+    const y = (v) => h - 6 - ((v - lo) / (hi - lo)) * (h - 12);
+    if (nolTengah) {
+      g.strokeStyle = cssVar("--line"); g.beginPath(); g.moveTo(0, y(0)); g.lineTo(w, y(0)); g.stroke();
+    }
+    g.strokeStyle = warna; g.lineWidth = 2; g.lineJoin = "round"; g.beginPath();
+    data.forEach((v, i) => { const x = (i / (MAKS_TITIK - 1)) * w; i ? g.lineTo(x, y(v)) : g.moveTo(x, y(v)); });
+    g.stroke();
+  }
+
+  function gambarSemua() {
+    gambar($("cJarak"), dJarak, cssVar("--accent"), false);
+    gambar($("cLaju"), dLaju, cssVar("--bad"), true);
+  }
+
+  function push(arr, v) { arr.push(v); if (arr.length > MAKS_TITIK) arr.shift(); }
+
+  function fmtWaktu(detik) {
+    if (detik < 0) return "--";
+    if (detik === 0) return "Sudah di batas";
+    if (detik < 60) return detik + " detik";
+    if (detik < 3600) return Math.floor(detik / 60) + " mnt " + (detik % 60) + " dtk";
+    return ">1 jam";
+  }
+
+  function tampil(d) {
+    const st = String(d.status || "");
+    const kelas = st.startsWith("NORMAL") ? "NORMAL" : st.startsWith("WASPADA") ? "WASPADA" :
+                  st.startsWith("BAHAYA") ? "BAHAYA" : "";
+    $("status").className = "status " + kelas;
+    $("stText").textContent = kelas || (st.startsWith("STANDBY") ? "STANDBY" : "TIDAK TERBACA");
+    $("stSub").textContent = { NORMAL:"Muka air aman", WASPADA:"Muka air mulai tinggi", BAHAYA:"Muka air di batas bahaya" }[kelas] ||
+                             (st.startsWith("STANDBY") ? "Saklar sensor dimatikan" : "Sensor tidak membaca jarak");
+    $("pompa").textContent = d.pompa ? "MENYALA" : "MATI";
+    $("last").textContent = "Pembaruan terakhir: " + new Date().toLocaleTimeString("id-ID");
+    if (!d.valid) { $("eta").textContent = "--"; return; }
+
+    const laju = Number(d.laju), jarak = Number(d.jarak);
+    $("jarak").textContent = jarak.toFixed(1);
+    $("laju").textContent = (laju > 0 ? "+" : "") + laju.toFixed(2);
+    const a = $("arah");
+    a.className = "arah " + (laju > 0 ? "naik" : laju < 0 ? "turun" : "stabil");
+    a.textContent = laju > 0 ? "▲ Air naik" : laju < 0 ? "▼ Air turun" : "● Stabil";
+    $("menit").textContent = "(" + (laju * 60 > 0 ? "+" : "") + (laju * 60).toFixed(1) + " cm/menit)";
+    $("eta").textContent = fmtWaktu(Number(d.eta));
+    push(dJarak, jarak); push(dLaju, laju);
+    gambarSemua();
+  }
+
+  function setConn(ok, t) { $("dot").classList.toggle("on", ok); $("conn").textContent = t; }
+
+  const client = mqtt.connect(BROKER, {
+    clientId: "web-" + Math.random().toString(16).slice(2, 10),
+    reconnectPeriod: 3000, connectTimeout: 10000
+  });
+  client.on("connect", () => { setConn(true, "Tersambung"); client.subscribe("airmon/" + KODE + "/#"); });
+  client.on("reconnect", () => setConn(false, "Menyambung ulang..."));
+  client.on("offline", () => setConn(false, "Terputus"));
+  client.on("message", (topic, payload) => {
+    const jenis = topic.split("/").pop(), teks = payload.toString();
+    if (jenis === "online") { $("dev").textContent = "Alat: " + (teks === "online" ? "online" : "offline"); return; }
+    if (jenis === "data") { try { tampil(JSON.parse(teks)); } catch (e) {} }
+  });
+  window.addEventListener("resize", gambarSemua);
+</script>
+</body>
+</html>
